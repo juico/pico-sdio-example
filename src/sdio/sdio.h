@@ -9,12 +9,13 @@
 #include "pico/stdlib.h"
 
 // Platform specific
-#define SDIO_CLK 10
-#define SDIO_CMD 11
-#define SDIO_D0  12
-#define SDIO_D1  13
-#define SDIO_D2  14
-#define SDIO_D3  15
+#define SDIO_CLK 16
+#define SDIO_CMD 17
+#define SDIO_D0  18
+#define SDIO_D1  19
+#define SDIO_D2  20
+#define SDIO_D3  21
+
 
 typedef void (*sd_callback_t)(uint32_t bytes_complete);
 uint32_t millis(void);

@@ -65,7 +65,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     sdio_status_t status;
     
     // Initialize at 1 MHz clock speed
-    rp2040_sdio_init(25);
+    rp2040_sdio_init(50);
 
     // Establish initial connection with the card
     for (int retries = 0; retries < 5; retries++)
@@ -143,8 +143,15 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     }
 
     // Increase to 25 MHz clock rate
+    rp2040_sdio_init(2);
+    sleep_ms(10);
+    //force 50 mhz without checking
+    uint8_t cmd6Data[64];
+    cardCMD6(0X00FFFFFF, cmd6Data);
+    sleep_ms(10);
+    cardCMD6(0X80FFFFF1, cmd6Data);
+    sleep_ms(10);
     rp2040_sdio_init(1);
-
     return true;
 }
 
@@ -296,14 +303,54 @@ bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
 }
 
 bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
-  printf("SDIO", "SdioCard::cardCMD6() not implemented");
-    return false;
+    //     uint8_t *real_dst = status;
+    // if (((uint32_t)status & 3) != 0)
+    // {
+    //     // Buffer is not aligned, need to memcpy() the data from a temporary buffer.
+    //     status = (uint8_t*)g_sdio_dma_buf;
+    // }
+    uint32_t reply;
+    if(//!checkReturnOk(rp2040_sdio_rx_start(status,1)) ||
+    !checkReturnOk(rp2040_sdio_command_R1(CMD6,arg, &reply)))
+    {
+        return false;
+    }
+//     do {
+// delay(10);
+//             azlog(bytes_done);
+
+//         } while (g_sdio_error == SDIO_BUSY);
+//     if (status != real_dst)
+//     {
+//         memcpy(real_dst, g_sdio_dma_buf, sizeof(g_sdio_dma_buf));
+//     }
+//     // 
+
+    return g_sdio_error == SDIO_OK;
 }
 
 bool SdioCard::readSCR(scr_t* scr) {
-  printf("SDIO", "SdioCard::readSCR() not implemented");
+    //werkt niet omdat de response van ACMD51 te kort is?(64 ipv 512 bits)
+    uint32_t reply;
+    if(!checkReturnOk(rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply))||
+    !checkReturnOk(rp2040_sdio_rx_start((uint8_t*) scr,1))||
+    !checkReturnOk(rp2040_sdio_command_R1(ACMD51,0, &reply))
+    )
+    {
     return false;
+    }
+        do {
+                uint32_t bytes_done;
+
+        g_sdio_error = rp2040_sdio_rx_poll(&bytes_done);
+
+
+    } while (g_sdio_error == SDIO_BUSY);
+
+    return g_sdio_error == SDIO_OK;
+
 }
+
 
 /* Writing and reading, with progress callback */
 

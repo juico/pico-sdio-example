@@ -28,6 +28,6 @@ add_compile_options(-Wall
 
 set_property(TARGET bench APPEND_STRING PROPERTY LINK_FLAGS "-Wl,--print-memory-usage")
 
-pico_enable_stdio_usb(bench 0)
-pico_enable_stdio_uart(bench 1)
+pico_enable_stdio_usb(bench 1)
+pico_enable_stdio_uart(bench 0)
 
