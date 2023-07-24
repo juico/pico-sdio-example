@@ -20,12 +20,12 @@
 ;
 ; Because data is written on the falling edge and read on the rising
 ; edge, it is preferrable to have a long 0 state and short 1 state.
-.define CLKDIV 3
+.define CLKDIV 4
 ;.define CLKDIV 5
 .define D0 ((CLKDIV + 1) / 2 - 1)
 .define D1 (CLKDIV/2 - 1)
 .define SDIO_CLK_GPIO 16
-
+.define sd_irq_num 7
 ; State machine 0 is used to:
 ; - generate continuous clock on SDIO_CLK
 ; - send CMD packets
@@ -47,6 +47,15 @@
 ;
 ; The state machine EXECCTRL should be set so that STATUS indicates TX FIFO < 2
 ; and that AUTOPULL and AUTOPUSH are enabled.
+.program sdio_irq_clk
+.side_set 1
+.wrap_target
+    irq sd_irq_num             side 1 [D1]
+    irq clear sd_irq_num       side 0 [D0]
+;    nop             side 1 [D1]
+;    nop                              side 0 [D0]
+.wrap
+
 
 .program sdio_cmd_clk
     .side_set 1
@@ -69,8 +78,8 @@ send_cmd:
 
 prep_resp:
     set pindirs, 0      side 0 [D0]    ; Set SDIO_CMD as input
-    out X, 8            side 1 [D1]    ; Get number of bits in response
-    nop                 side 0 [D0]    ; For clock alignment
+    out X, 8            side 1 [D1+D0+1]    ; Get number of bits in response
+    ;nop                 side 0 [D0]    ; For clock alignment
     jmp !X resp_done    side 1 [D1]    ; Check if we expect a response
 
 wait_resp:
@@ -87,6 +96,45 @@ read_resp:
 
 resp_done:
     push                side 0 [D0]    ; Push the remaining part of response
+; .program sdio_cmd_clk
+;     .side_set 1
+
+;     mov OSR, NULL       side 1 [D1]    ; Make sure OSR is full of zeros to prevent autopull
+
+; wait_cmd:
+;     mov Y, !STATUS      side 0 [D0]    ; Check if TX FIFO has data
+;     jmp !Y wait_cmd     side 1 [D1]
+
+; load_cmd:
+;     out NULL, 32        side 0 [D0]    ; Load first word (trigger autopull)
+;     out X, 8            side 1 [D1]    ; Number of bits to send
+;     set pins, 1         side 0 [D0]    ; Initial state of CMD is high
+;     set pindirs, 1      side 1 [D1]    ; Set SDIO_CMD as output
+
+; send_cmd:
+;     out pins, 1         side 0 [D0]    ; Write output on falling edge of CLK
+;     jmp X-- send_cmd    side 1 [D1]
+
+; prep_resp:
+;     set pindirs, 0      side 0 [D0]    ; Set SDIO_CMD as input
+;     out X, 8            side 1 [D1]    ; Get number of bits in response
+;     nop                 side 0 [D0]    ; For clock alignment
+;     jmp !X resp_done    side 1 [D1]    ; Check if we expect a response
+
+; wait_resp:
+;     nop                  side 0 [D0]
+;     jmp PIN wait_resp    side 1 [D1]    ; Loop until SDIO_CMD = 0
+
+;     ; Note: input bits are read at the same time as we write CLK=0.
+;     ; Because the host controls the clock, the read happens before
+;     ; the card sees the falling clock edge. This gives maximum time
+;     ; for the data bit to settle.
+; read_resp:
+;     in PINS, 1          side 0 [D0]    ; Read input data bit
+;     jmp X-- read_resp   side 1 [D1]    ; Loop to receive all data bits
+
+; resp_done:
+;     push                side 0 [D0]    ; Push the remaining part of response
 
 ; State machine 1 is used to send and receive data blocks.
 ; Pin mapping for this state machine:
@@ -102,7 +150,7 @@ resp_done:
 wait_start:
     mov X, Y                               ; Reinitialize number of nibbles to receive
     wait 0 pin 0                           ; Wait for zero state on D0
-    wait 1 gpio SDIO_CLK_GPIO  [CLKDIV-1]  ; Wait for rising edge and then whole clock cycle
+    wait 1 irq 7  [CLKDIV-1]  ; Wait for rising edge and then whole clock cycle
 
 rx_data:
     in PINS, 4                 [CLKDIV-2]  ; Read nibble
@@ -125,8 +173,8 @@ rx_data:
 ; contains the D0 line response from card.
 
 .program sdio_data_tx
-    wait 0 gpio SDIO_CLK_GPIO  
-    wait 1 gpio SDIO_CLK_GPIO  [CLKDIV + D1 - 1]; Synchronize so that write occurs on falling edge
+    ;wait 0 gpio SDIO_CLK_GPIO  
+    wait 1 irq 7  [CLKDIV + D1 -1]; Synchronize so that write occurs on falling edge
 
 tx_loop:
     out PINS, 4                [D0]    ; Write nibble and wait for whole clock cycle

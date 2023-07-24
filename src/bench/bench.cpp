@@ -4,12 +4,12 @@
 #include <iostream>
 #include "SdFat.h"
 //#include "sdios.h"
-#include "FreeStack.h"
+//#include "FreeStack.h"
 #include "pico/stdlib.h"
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
 // 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
-#define SD_FAT_TYPE 3
+#define SD_FAT_TYPE 0
 /*
   Change the value of SD_CS_PIN if you are using SPI and
   your hardware does not use the default value, SS.
@@ -46,10 +46,10 @@ const bool PRE_ALLOCATE = true;
 const bool SKIP_FIRST_LATENCY = true;
 
 // Size of read/write.
-const size_t BUF_SIZE = 2*32768;
+const size_t BUF_SIZE = 32768;
 
 // File size in MB where MB = 1,000,000 bytes.
-const uint32_t FILE_SIZE_MB = 50;
+const uint32_t FILE_SIZE_MB = 50;//BUF_SIZE*5;
 
 // Write pass count.
 const uint8_t WRITE_COUNT = 2;
@@ -60,7 +60,7 @@ const uint8_t READ_COUNT = 2;
 // End of configuration constants.
 //------------------------------------------------------------------------------
 // File size in bytes.
-const uint32_t FILE_SIZE = 1000000UL*FILE_SIZE_MB;
+const uint32_t FILE_SIZE = 2000*BUF_SIZE;//1000000UL*FILE_SIZE_MB;
 
 // Insure 4-byte alignment.
 uint32_t buf32[(BUF_SIZE + 3)/4];
@@ -142,8 +142,10 @@ void setup() {
 }
 //------------------------------------------------------------------------------
 int main() {
+  //set_sys_clock_khz(125000,true);
+  set_sys_clock_khz(280000,true);
   stdio_init_all();
-
+  //stdout_uart_init();
   float s;
   uint32_t t;
   uint32_t maxLatency;
@@ -162,9 +164,10 @@ int main() {
 #if HAS_UNUSED_STACK
   cout << F("FreeStack: ") << FreeStack() << endl;
 #endif  // HAS_UNUSED_STACK
-
+cout << "Hoi" << endl;
   if (!sd.begin(SD_CONFIG)) {
-    //    sd.initErrorHalt(&Serial);
+       // sd.initErrorHalt(&Serial);
+       cout << "oeps gaat niet goed" << endl;
   }
   if (sd.fatType() == FAT_TYPE_EXFAT) {
     cout << F("Type is exFAT") << endl;
@@ -194,12 +197,13 @@ int main() {
   cout << F("FILE_SIZE_MB = ") << FILE_SIZE_MB << endl;
   cout << F("BUF_SIZE = ") << BUF_SIZE << F(" bytes\n");
   cout << F("Starting write test, please wait.") << endl << endl;
-
   // do write test
   uint32_t n = FILE_SIZE/BUF_SIZE;
   cout <<F("write speed and latency") << endl;
   cout << F("speed,max,min,avg") << endl;
   cout << F("KB/Sec,usec,usec,usec") << endl;
+  float speed;
+  uint32_t latencies[n]={};
   for (uint8_t nTest = 0; nTest < WRITE_COUNT; nTest++) {
     file.truncate(0);
     if (PRE_ALLOCATE) {
@@ -211,6 +215,9 @@ int main() {
     minLatency = 9999999;
     totalLatency = 0;
     skipLatency = SKIP_FIRST_LATENCY;
+    uint32_t currentsector= file.firstSector();
+    sd.card()->writeStart(currentsector, FILE_SIZE/512);
+    sleep_ms(500);
     t = millis();
     for (uint32_t i = 0; i < n; i++) {
       uint32_t m = micros();
@@ -218,6 +225,7 @@ int main() {
         error("write failed");
       }
       m = micros() - m;
+      latencies[i]=m;
       totalLatency += m;
       if (skipLatency) {
         // Wait until first write to SD, not just a copy to the cache.

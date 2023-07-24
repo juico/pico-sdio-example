@@ -66,7 +66,10 @@ class SdioCard : public SdCardInterface {
    *
    * \return true for success or false for failure.
    */
-  bool cardCMD6(uint32_t arg, uint8_t* status);
+  bool cardCMD6(uint32_t arg, uint8_t *status);
+  bool read_ext(uint8_t fno, uint8_t page, uint16_t offset, uint16_t len, uint8_t *reg_buf);
+
+
   /** Disable an SDIO card.
    * not implemented.
    */
@@ -159,6 +162,7 @@ class SdioCard : public SdCardInterface {
    * \return true for success or false for failure.
    */
   bool readSCR(scr_t *scr);
+  bool Acmd(uint8_t acommand, uint32_t arg);
   /** Start a read multiple sectors sequence.
    *
    * \param[in] sector Address of first sector in sequence.
@@ -215,6 +219,7 @@ class SdioCard : public SdCardInterface {
    * \return true for success or false for failure.
    */
   bool writeSector(uint32_t sector, const uint8_t* src);
+  bool startWriteSectors(uint32_t n);
   /**
    * Write multiple 512 byte sectors to an SD card.
    *

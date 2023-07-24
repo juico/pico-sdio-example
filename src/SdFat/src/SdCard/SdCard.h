@@ -27,7 +27,7 @@
 #include "SdioCard.h"
 #include "SdSpiCard.h"
 #ifdef HAS_SDIO_CLASS
-typedef SdCardInterface SdCard;
+typedef SdioCard SdCard;
 #else  // HAS_SDIO_CLASS
 typedef SdSpiCard SdCard;
 #endif  // HAS_SDIO_CLASS
@@ -54,7 +54,8 @@ class SdCardFactory {
    * \param[in] config SPI configuration.
    * \return generic card pointer.
    */
-  SdCard* newCard(SdSpiConfig config) {
+
+  SdSpiCard* newCard(SdSpiConfig config) {
     m_spiCard.begin(config);
     return &m_spiCard;
   }

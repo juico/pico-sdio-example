@@ -50,7 +50,7 @@ sdio_status_t rp2040_sdio_command_R3(uint8_t command, uint32_t arg, uint32_t *re
 // Start transferring data from SD card to memory buffer
 // Transfer block size is always 512 bytes.
 sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks);
-
+sdio_status_t rp2040_sdio_rx_start_var(uint8_t *buffer, uint32_t num_blocks,uint16_t block_size);
 // Check if reception is complete
 // Returns SDIO_BUSY while transferring, SDIO_OK when done and error on failure.
 sdio_status_t rp2040_sdio_rx_poll(uint32_t *bytes_complete = nullptr);

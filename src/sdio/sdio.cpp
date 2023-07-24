@@ -19,6 +19,7 @@
 #define SDIO_PIO pio1
 #define SDIO_CMD_SM 0
 #define SDIO_DATA_SM 1
+#define SDIO_IRQ_SM 2
 #define SDIO_DMA_CH 4
 #define SDIO_DMA_CHB 5
 
@@ -29,6 +30,7 @@ enum sdio_transfer_state_t { SDIO_IDLE, SDIO_RX, SDIO_TX, SDIO_TX_WAIT_IDLE};
 
 static struct {
     uint32_t pio_cmd_clk_offset;
+    uint32_t pio_irq_clk_offset;
     uint32_t pio_data_rx_offset;
     pio_sm_config pio_cfg_data_rx;
     uint32_t pio_data_tx_offset;
@@ -412,7 +414,69 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks)
 
     return SDIO_OK;
 }
+sdio_status_t rp2040_sdio_rx_start_var(uint8_t *buffer, uint32_t num_blocks,uint16_t block_size)
+{
+    // Buffer must be aligned
+    assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
 
+    g_sdio.transfer_state = SDIO_RX;
+    g_sdio.transfer_start_time = millis();
+    g_sdio.data_buf = (uint32_t*)buffer;
+    g_sdio.blocks_done = 0;
+    g_sdio.total_blocks = num_blocks;
+    g_sdio.blocks_checksumed = 0;
+    g_sdio.checksum_errors = 0;
+
+    // Create DMA block descriptors to store each block of 512 bytes of data to buffer
+    // and then 8 bytes to g_sdio.received_checksums.
+    for (int i = 0; i < num_blocks; i++)
+    {
+        g_sdio.dma_blocks[i * 2].write_addr = buffer + i * block_size;
+        g_sdio.dma_blocks[i * 2].transfer_count = block_size / sizeof(uint32_t);
+
+        g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
+        g_sdio.dma_blocks[i * 2 + 1].transfer_count = 2;
+    }
+    g_sdio.dma_blocks[num_blocks * 2].write_addr = 0;
+    g_sdio.dma_blocks[num_blocks * 2].transfer_count = 0;
+
+    // Configure first DMA channel for reading from the PIO RX fifo
+    dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMA_CH);
+    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&dmacfg, false);
+    channel_config_set_write_increment(&dmacfg, true);
+    channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_DATA_SM, false));
+    channel_config_set_bswap(&dmacfg, true);
+    channel_config_set_chain_to(&dmacfg, SDIO_DMA_CHB);
+    dma_channel_configure(SDIO_DMA_CH, &dmacfg, 0, &SDIO_PIO->rxf[SDIO_DATA_SM], 0, false);
+
+    // Configure second DMA channel for reconfiguring the first one
+    dmacfg = dma_channel_get_default_config(SDIO_DMA_CHB);
+    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&dmacfg, true);
+    channel_config_set_write_increment(&dmacfg, true);
+    channel_config_set_ring(&dmacfg, true, 3);
+    dma_channel_configure(SDIO_DMA_CHB, &dmacfg, &dma_hw->ch[SDIO_DMA_CH].al1_write_addr,
+        g_sdio.dma_blocks, 2, false);
+
+    // Initialize PIO state machine
+    pio_sm_init(SDIO_PIO, SDIO_DATA_SM, g_sdio.pio_data_rx_offset, &g_sdio.pio_cfg_data_rx);
+    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_DATA_SM, SDIO_D0, 4, false);
+
+    // Write number of nibbles to receive to Y register
+    pio_sm_put(SDIO_PIO, SDIO_DATA_SM, SDIO_BLOCK_SIZE * 2 + 16 - 1);
+    pio_sm_exec(SDIO_PIO, SDIO_DATA_SM, pio_encode_out(pio_y, 32));
+
+    // Enable RX FIFO join because we don't need the TX FIFO during transfer.
+    // This gives more leeway for the DMA block switching
+    SDIO_PIO->sm[SDIO_DATA_SM].shiftctrl |= PIO_SM0_SHIFTCTRL_FJOIN_RX_BITS;
+
+    // Start PIO and DMA
+    dma_channel_start(SDIO_DMA_CHB);
+    pio_sm_set_enabled(SDIO_PIO, SDIO_DATA_SM, true);
+
+    return SDIO_OK;
+}
 // Check checksums for received blocks
 static void sdio_verify_rx_checksums(uint32_t maxcount)
 {
@@ -762,16 +826,27 @@ void rp2040_sdio_init(int clock_divider)
     sm_config_set_in_pins(&cfg, SDIO_CMD);
     sm_config_set_set_pins(&cfg, SDIO_CMD, 1);
     sm_config_set_jmp_pin(&cfg, SDIO_CMD);
-    sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+    sm_config_set_sideset_pins(&cfg, 22);
+    // sm_config_set_sideset_pins(&cfg, SDIO_CLK);
     sm_config_set_out_shift(&cfg, false, true, 32);
     sm_config_set_in_shift(&cfg, false, true, 32);
     sm_config_set_clkdiv_int_frac(&cfg, clock_divider, 0);
     sm_config_set_mov_status(&cfg, STATUS_TX_LESSTHAN, 2);
 
     pio_sm_init(SDIO_PIO, SDIO_CMD_SM, g_sdio.pio_cmd_clk_offset, &cfg);
-    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, SDIO_CLK, 1, true);
-    pio_sm_set_enabled(SDIO_PIO, SDIO_CMD_SM, true);
+    //pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, SDIO_CLK, 1, true);
+    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, 22, 1, true);
 
+    // IRQ Clock 
+    g_sdio.pio_irq_clk_offset = pio_add_program(SDIO_PIO,&sdio_irq_clk_program);
+    cfg = sdio_irq_clk_program_get_default_config(g_sdio.pio_irq_clk_offset);
+    sm_config_set_clkdiv_int_frac(&cfg, clock_divider, 0);
+    sm_config_set_sideset_pins(&cfg,SDIO_CLK);
+
+    pio_sm_init(SDIO_PIO,SDIO_IRQ_SM,g_sdio.pio_irq_clk_offset,&cfg);
+    pio_sm_set_consecutive_pindirs(SDIO_PIO,SDIO_IRQ_SM,SDIO_CLK,1,true);
+    pio_enable_sm_mask_in_sync(SDIO_PIO,(1u << SDIO_IRQ_SM) | (1u << SDIO_CMD_SM));
+    // pio_sm_set_enabled(SDIO_PIO, SDIO_CMD_SM, true);
     // Data reception program
     g_sdio.pio_data_rx_offset = pio_add_program(SDIO_PIO, &sdio_data_rx_program);
     g_sdio.pio_cfg_data_rx = sdio_data_rx_program_get_default_config(g_sdio.pio_data_rx_offset);
@@ -794,12 +869,12 @@ void rp2040_sdio_init(int clock_divider)
     // This reduces input delay.
     // Because the CLK is driven synchronously to CPU clock,
     // there should be no metastability problems.
-    SDIO_PIO->input_sync_bypass |= (1 << SDIO_CLK) | (1 << SDIO_CMD)
+    SDIO_PIO->input_sync_bypass |= (1 << SDIO_CLK) | (1 << SDIO_CMD) 
                                  | (1 << SDIO_D0) | (1 << SDIO_D1) | (1 << SDIO_D2) | (1 << SDIO_D3);
-
+    
     // Set pullups
     gpio_pull_up(SDIO_CMD);
-    gpio_pull_up(SDIO_CLK);
+    gpio_pull_down(SDIO_CLK);
     gpio_pull_up(SDIO_D0);
     gpio_pull_up(SDIO_D1);
     gpio_pull_up(SDIO_D2);
@@ -816,10 +891,19 @@ void rp2040_sdio_init(int clock_divider)
     // Redirect GPIOs to PIO
     gpio_set_function(SDIO_CMD, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_CLK, GPIO_FUNC_PIO1);
+    gpio_set_function(22,GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D0, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D1, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D2, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D3, GPIO_FUNC_PIO1);
+
+    //Set Drive strength
+    // gpio_set_drive_strength(SDIO_CMD,GPIO_DRIVE_STRENGTH_4MA);
+    // gpio_set_drive_strength(SDIO_CLK,GPIO_DRIVE_STRENGTH_4MA);
+    // gpio_set_drive_strength(SDIO_D0,GPIO_DRIVE_STRENGTH_4MA);
+    // gpio_set_drive_strength(SDIO_D1,GPIO_DRIVE_STRENGTH_4MA);
+    // gpio_set_drive_strength(SDIO_D2,GPIO_DRIVE_STRENGTH_4MA);
+    // gpio_set_drive_strength(SDIO_D3,GPIO_DRIVE_STRENGTH_4MA);
 
     // Set up IRQ handler when DMA completes.
     irq_set_exclusive_handler(DMA_IRQ_1, rp2040_sdio_tx_irq);
