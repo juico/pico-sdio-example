@@ -2,39 +2,38 @@
 
 This is an standalone example of the [bench](https://github.com/greiman/SdFat/tree/master/examples/bench) code from [SdFat](https://github.com/greiman/SdFat) using an SDIO PIO implementation from [ZuluSCSI](https://github.com/ZuluSCSI/ZuluSCSI-firmware)
 
-This is WIP as performance has been lower than expected, so checking out what is the issue.
+This fork added some changes to improve large write performance.
 
-Current numbers with a supposedly good SD Card:
+Current numbers with a supposedly good SD Card and clock speed 250MHz:
 
 ```
-FreeStack: 241592
-Type is FAT32
-Card size: 15.9315 GB (GB = 1E9 bytes)
+Type is exFAT
+Card size: 128.178 GB (GB = 1E9 bytes)
 
-Manufacturer ID: 0X3
-OEM ID: SD
-Product: SS16G
-Revision: 8.0
-Serial number: 0XB4064393
-Manufacturing date: 12/2016
+Manufacturer ID: 0X1B
+OEM ID: SM
+Product: ED2S5
+Revision: 3.0
+Serial number: 0XB210678A
+Manufacturing date: 10/2022
 
-FILE_SIZE_MB = 5
-BUF_SIZE = 512 bytes
+FILE_SIZE_MB = 50
+BUF_SIZE = 32768 bytes
 Starting write test, please wait.
 
 write speed and latency
 speed,max,min,avg
 KB/Sec,usec,usec,usec
-454.422,70708,933,1126
-454.669,70438,932,1125
+26058.1,24395,1216,1254
+26027.0,16960,1216,1256
 
 Starting read test, please wait.
 
 read speed and latency
 speed,max,min,avg
 KB/Sec,usec,usec,usec
-2162.63,256,234,236
-2162.63,254,234,236
+24702.6,1395,1313,1326
+24702.6,1392,1313,1326
 
 Done
 ```

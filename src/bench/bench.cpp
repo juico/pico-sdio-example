@@ -143,7 +143,7 @@ void setup() {
 //------------------------------------------------------------------------------
 int main() {
   //set_sys_clock_khz(125000,true);
-  set_sys_clock_khz(280000,true);
+  set_sys_clock_khz(250000,true);
   stdio_init_all();
   //stdout_uart_init();
   float s;
@@ -152,7 +152,7 @@ int main() {
   uint32_t minLatency;
   uint32_t totalLatency;
   bool skipLatency;
-
+  sleep_ms(500);
   // Discard any input.
   //  clearSerialInput();
 
