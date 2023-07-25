@@ -65,7 +65,116 @@ static sd_callback_t get_stream_callback(const uint8_t *buf, uint32_t count, con
     
     return NULL;
 }
+static bool sdio_read_ext_register(int m_io, int func_no, uint32_t addr, uint32_t length, uint8_t *dest)
+{
+    uint32_t read_arg = ((uint32_t)(m_io & 1) << 31) |
+                         ((uint32_t)(func_no & 15) << 27) |
+                         ((uint32_t)(addr & 0x1FFFF) << 9) |
+                         ((uint32_t)((length - 1) & 511));
+    uint32_t reply;
+    if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
+        !checkReturnOk(rp2040_sdio_rx_start((uint8_t*)g_sdio_dma_buf, 1)) || // Prepare for reception
+        !checkReturnOk(rp2040_sdio_command_R1(48, read_arg, &reply))) // Read extension register
+    {
+        return false;
+    }
 
+    do {
+        uint32_t bytes_done;
+        g_sdio_error = rp2040_sdio_rx_poll(&bytes_done);
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        printf("sdio_read_ext_register(", addr, ") failed: ", (int)g_sdio_error);
+    }
+
+    memcpy(dest, g_sdio_dma_buf, length);
+    return g_sdio_error == SDIO_OK;
+}
+
+static bool sdio_write_ext_register_byte(int m_io, int func_no, uint32_t addr, uint8_t byte_val)
+{
+    g_sdio_dma_buf[0] = byte_val;
+
+    uint32_t write_arg = ((uint32_t)(m_io & 1) << 31) |
+                         ((uint32_t)(func_no & 15) << 27) |
+                         ((uint32_t)(addr & 0x1FFFF) << 9);
+    uint32_t reply;
+
+    if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
+        !checkReturnOk(rp2040_sdio_command_R1(49, write_arg, &reply)) || // Write extension register
+        !checkReturnOk(rp2040_sdio_tx_start((uint8_t*)g_sdio_dma_buf, 1))) // Start transmission
+    {
+        printf("sdio_write_ext_register_byte(", addr, ") failed: ", (int)g_sdio_error);
+        return false;
+    }
+
+    do {
+        uint32_t bytes_done;
+        g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        printf("sdio_write_ext_register_byte(", addr, ") failed: ", (int)g_sdio_error);
+    }
+
+    return g_sdio_error == SDIO_OK;
+}
+bool sdio_set_cache_enabled(bool enabled)
+{
+    // Read SD_STATUS register with ACMD13
+    uint32_t sd_status[16] = {0};
+    uint32_t reply;
+    if (!checkReturnOk(rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply)) ||
+        !checkReturnOk(rp2040_sdio_command_R1(ACMD13, 0, &reply)))
+    {
+        return false;
+    }
+
+    // Read the 512-bit response
+    rp2040_sdio_rx_start((uint8_t*)sd_status, 1, 64);
+    do {
+        g_sdio_error = rp2040_sdio_rx_poll();
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        printf("azplatform_set_cache_enabled: Failed to get response to ACMD13, ", (int)g_sdio_error);
+        return false;
+    }
+
+    bool cache_support = (sd_status[5] >> 18) & 1;
+    int cqueue_support = (sd_status[5] >> 19) & 31;
+
+    printf("SD card cache support: %d, command queue support: %d", (int)cache_support,cqueue_support);
+
+    if (cache_support)
+    {
+        uint8_t page_hdr[8];
+        sdio_read_ext_register(0, 2, 0, sizeof(page_hdr), page_hdr);
+        //printf("Performance enhancement page hdr: ", bytearray(page_hdr, 8));
+
+        // Enable cache by writing byte 260, refer to SDIO spec "Table 5-30 : Performance Enhancement Register Set"
+        if (sdio_write_ext_register_byte(0, 2, 260, enabled))
+        {
+            uint8_t state;
+            sdio_read_ext_register(0, 2, 260, 1, &state);
+
+            printf("SD card cache state: ", state);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool sdio_flush_cache()
+{
+    // Flush cache by writing byte 261
+    return sdio_write_ext_register_byte(0, 2, 261, 1);
+}
 bool SdioCard::begin(SdioConfig sdioConfig)
 {
     uint32_t reply;
@@ -151,7 +260,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     rp2040_sdio_init(2);
     sleep_ms(10);
     rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply);
-    rp2040_sdio_rx_start_var(g_sdio_scr.scr,1,8);
+    rp2040_sdio_rx_start(g_sdio_scr.scr,1,8);
     rp2040_sdio_command_R1(ACMD51, 0, &reply);
 
     
@@ -163,25 +272,25 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     if (g_sdio_scr.sdSpec() > 0)
     {
         cardCMD6(0X00FFFFFF, cmd6status);
-        sleep_ms(10);
-        if((2 & cmd6status[13]))
+        if((cmd6status[13]& 0x02))
         {
             cardCMD6(0X80FFFFF1, cmd6status);
-            sleep_ms(10);
-            if((cmd6status[16] & 0XF) == 1)
+            if((cmd6status[16] & 0XF))
             {
                 g_sdio_kHzSdClk = 50000;
                 rp2040_sdio_init(1);
+                printf("Enabling high speed \n");
             }
         }
     } 
     else
     {
         g_sdio_kHzSdClk = 25000;
+        printf("Not enabling high speed \n");
+
     }
-  cardCMD6(0X80FF1FFF, cmd6status);
-   sleep_ms(10);
-    
+    cardCMD6(0X80FF1FFF, cmd6status);
+    sdio_set_cache_enabled(true);
     return true;
 }
 
@@ -346,52 +455,32 @@ bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
     return false;
 }
 
-// static int sd_read_ext_reg(struct mmc_card *card, u8 fno, u8 page,
-// 			   u16 offset, u16 len, u8 *reg_buf)
-// {
-// 	u32 cmd_args;
-
-// 	/*
-// 	 * Command arguments of CMD48:
-// 	 * [31:31] MIO (0 = memory).
-// 	 * [30:27] FNO (function number).
-// 	 * [26:26] reserved (0).
-// 	 * [25:18] page number.
-// 	 * [17:9] offset address.
-// 	 * [8:0] length (0 = 1 byte, 1ff = 512 bytes).
-// 	 */
-// 	cmd_args = fno << 27 | page << 18 | offset << 9 | (len -1);
-
-// 	return mmc_send_adtc_data(card, card->host, SD_READ_EXTR_SINGLE,
-// 				  cmd_args, reg_buf, 512);
-// }
-
-bool SdioCard::read_ext( uint8_t fno, uint8_t page, uint16_t offset, uint16_t len,uint8_t *reg_buf) {
-    uint32_t arg = fno << 27 | page << 18 | offset << 9 | (len -1);
-    uint32_t reply;
-    rp2040_sdio_rx_start(reg_buf,1);
-    if(!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || 
-    !checkReturnOk(rp2040_sdio_command_R1(CMD48,arg, &reply)))
-    {
-        return false;
-    }
-
-    return g_sdio_error == SDIO_OK;
-}
-
 
 bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
     uint32_t reply;
-    rp2040_sdio_rx_start_var(status,1,64);
-    if(
-    !checkReturnOk(rp2040_sdio_command_R1(CMD6,arg, &reply)))
+    rp2040_sdio_rx_start(status, 1, 64);
+    if (!checkReturnOk(rp2040_sdio_command_R1(CMD6, arg, &reply)))
     {
         return false;
+    }
+
+    // Read the 512-bit response
+    
+    do {
+        g_sdio_error = rp2040_sdio_rx_poll();
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        printf("SdioCard::cardCMD6: Failed to get response, ", (int)g_sdio_error);
     }
 
     return g_sdio_error == SDIO_OK;
 }
 
+void SdioCard::end(){
+    sdio_flush_cache();
+}
 bool SdioCard::readSCR(scr_t* scr) {
     *scr =g_sdio_scr;
     return true;

@@ -67,13 +67,13 @@ class SdioCard : public SdCardInterface {
    * \return true for success or false for failure.
    */
   bool cardCMD6(uint32_t arg, uint8_t *status);
-  bool read_ext(uint8_t fno, uint8_t page, uint16_t offset, uint16_t len, uint8_t *reg_buf);
+  //bool read_ext(uint8_t fno, uint8_t page, uint16_t offset, uint16_t len, uint8_t *dest);
 
 
   /** Disable an SDIO card.
-   * not implemented.
+   * Flush the cache
    */
-  void end() {}
+  void end();
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
     uint32_t __attribute__((error("use sectorCount()"))) cardSize();

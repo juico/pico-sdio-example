@@ -43,8 +43,10 @@ static struct {
     uint32_t total_blocks; // Total number of blocks to transfer
     uint32_t blocks_checksumed; // Number of blocks that have had CRC calculated
     uint32_t checksum_errors; // Number of checksum errors detected
+    uint32_t blocksize; // Number of bytes per block (typically 512)
+    uint32_t words_per_block; // Number of 32-bit words per block (typically 128)    
 
-    // Variables for block writes
+    // Variables for block writes    
     uint64_t next_wr_block_checksum;
     uint32_t end_token_buf[3]; // CRC and end token for write block
     sdio_status_t wr_status;
@@ -351,7 +353,7 @@ sdio_status_t rp2040_sdio_command_R3(uint8_t command, uint32_t arg, uint32_t *re
  * Data reception from SD card
  *******************************************************/
 
-sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks)
+sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t blocksize)
 {
     // Buffer must be aligned
     assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
@@ -363,13 +365,15 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks)
     g_sdio.total_blocks = num_blocks;
     g_sdio.blocks_checksumed = 0;
     g_sdio.checksum_errors = 0;
+    g_sdio.blocksize = blocksize;
+    g_sdio.words_per_block = blocksize / 4;
 
     // Create DMA block descriptors to store each block of 512 bytes of data to buffer
     // and then 8 bytes to g_sdio.received_checksums.
     for (int i = 0; i < num_blocks; i++)
     {
-        g_sdio.dma_blocks[i * 2].write_addr = buffer + i * SDIO_BLOCK_SIZE;
-        g_sdio.dma_blocks[i * 2].transfer_count = SDIO_BLOCK_SIZE / sizeof(uint32_t);
+        g_sdio.dma_blocks[i * 2].write_addr = buffer + i * blocksize;
+        g_sdio.dma_blocks[i * 2].transfer_count = blocksize / sizeof(uint32_t);
 
         g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
         g_sdio.dma_blocks[i * 2 + 1].transfer_count = 2;
@@ -401,70 +405,7 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks)
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_DATA_SM, SDIO_D0, 4, false);
 
     // Write number of nibbles to receive to Y register
-    pio_sm_put(SDIO_PIO, SDIO_DATA_SM, SDIO_BLOCK_SIZE * 2 + 16 - 1);
-    pio_sm_exec(SDIO_PIO, SDIO_DATA_SM, pio_encode_out(pio_y, 32));
-
-    // Enable RX FIFO join because we don't need the TX FIFO during transfer.
-    // This gives more leeway for the DMA block switching
-    SDIO_PIO->sm[SDIO_DATA_SM].shiftctrl |= PIO_SM0_SHIFTCTRL_FJOIN_RX_BITS;
-
-    // Start PIO and DMA
-    dma_channel_start(SDIO_DMA_CHB);
-    pio_sm_set_enabled(SDIO_PIO, SDIO_DATA_SM, true);
-
-    return SDIO_OK;
-}
-sdio_status_t rp2040_sdio_rx_start_var(uint8_t *buffer, uint32_t num_blocks,uint16_t block_size)
-{
-    // Buffer must be aligned
-    assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
-
-    g_sdio.transfer_state = SDIO_RX;
-    g_sdio.transfer_start_time = millis();
-    g_sdio.data_buf = (uint32_t*)buffer;
-    g_sdio.blocks_done = 0;
-    g_sdio.total_blocks = num_blocks;
-    g_sdio.blocks_checksumed = 0;
-    g_sdio.checksum_errors = 0;
-
-    // Create DMA block descriptors to store each block of 512 bytes of data to buffer
-    // and then 8 bytes to g_sdio.received_checksums.
-    for (int i = 0; i < num_blocks; i++)
-    {
-        g_sdio.dma_blocks[i * 2].write_addr = buffer + i * block_size;
-        g_sdio.dma_blocks[i * 2].transfer_count = block_size / sizeof(uint32_t);
-
-        g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
-        g_sdio.dma_blocks[i * 2 + 1].transfer_count = 2;
-    }
-    g_sdio.dma_blocks[num_blocks * 2].write_addr = 0;
-    g_sdio.dma_blocks[num_blocks * 2].transfer_count = 0;
-
-    // Configure first DMA channel for reading from the PIO RX fifo
-    dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMA_CH);
-    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dmacfg, false);
-    channel_config_set_write_increment(&dmacfg, true);
-    channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_DATA_SM, false));
-    channel_config_set_bswap(&dmacfg, true);
-    channel_config_set_chain_to(&dmacfg, SDIO_DMA_CHB);
-    dma_channel_configure(SDIO_DMA_CH, &dmacfg, 0, &SDIO_PIO->rxf[SDIO_DATA_SM], 0, false);
-
-    // Configure second DMA channel for reconfiguring the first one
-    dmacfg = dma_channel_get_default_config(SDIO_DMA_CHB);
-    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dmacfg, true);
-    channel_config_set_write_increment(&dmacfg, true);
-    channel_config_set_ring(&dmacfg, true, 3);
-    dma_channel_configure(SDIO_DMA_CHB, &dmacfg, &dma_hw->ch[SDIO_DMA_CH].al1_write_addr,
-        g_sdio.dma_blocks, 2, false);
-
-    // Initialize PIO state machine
-    pio_sm_init(SDIO_PIO, SDIO_DATA_SM, g_sdio.pio_data_rx_offset, &g_sdio.pio_cfg_data_rx);
-    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_DATA_SM, SDIO_D0, 4, false);
-
-    // Write number of nibbles to receive to Y register
-    pio_sm_put(SDIO_PIO, SDIO_DATA_SM, SDIO_BLOCK_SIZE * 2 + 16 - 1);
+    pio_sm_put(SDIO_PIO, SDIO_DATA_SM, blocksize * 2 + 16 - 1);
     pio_sm_exec(SDIO_PIO, SDIO_DATA_SM, pio_encode_out(pio_y, 32));
 
     // Enable RX FIFO join because we don't need the TX FIFO during transfer.
@@ -484,8 +425,8 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
     {
         // Calculate checksum from received data
         int blockidx = g_sdio.blocks_checksumed++;
-        uint64_t checksum = sdio_crc16_4bit_checksum(g_sdio.data_buf + blockidx * SDIO_WORDS_PER_BLOCK,
-                                                     SDIO_WORDS_PER_BLOCK);
+        uint64_t checksum = sdio_crc16_4bit_checksum(g_sdio.data_buf + blockidx * g_sdio.words_per_block,
+                                                     g_sdio.words_per_block);
 
         // Convert received checksum to little-endian format
         uint32_t top = __builtin_bswap32(g_sdio.received_checksums[blockidx].top);
@@ -533,7 +474,7 @@ sdio_status_t rp2040_sdio_rx_poll(uint32_t *bytes_complete)
 
     if (bytes_complete)
     {
-        *bytes_complete = g_sdio.blocks_done * SDIO_BLOCK_SIZE;
+        *bytes_complete = g_sdio.blocks_done * g_sdio.words_per_block;
     }
 
     if (g_sdio.transfer_state == SDIO_IDLE)
@@ -579,8 +520,8 @@ static void sdio_start_next_block_tx()
     channel_config_set_bswap(&dmacfg, true);
     channel_config_set_chain_to(&dmacfg, SDIO_DMA_CHB);
     dma_channel_configure(SDIO_DMA_CH, &dmacfg,
-        &SDIO_PIO->txf[SDIO_DATA_SM], g_sdio.data_buf + g_sdio.blocks_done * SDIO_WORDS_PER_BLOCK,
-        SDIO_WORDS_PER_BLOCK, false);
+        &SDIO_PIO->txf[SDIO_DATA_SM], g_sdio.data_buf + g_sdio.blocks_done * g_sdio.words_per_block,
+        g_sdio.words_per_block, false);
 
     // Prepare second DMA channel to send the CRC and block end marker
     uint64_t crc = g_sdio.next_wr_block_checksum;
@@ -617,12 +558,12 @@ static void sdio_compute_next_tx_checksum()
 {
     assert (g_sdio.blocks_done < g_sdio.total_blocks && g_sdio.blocks_checksumed < g_sdio.total_blocks);
     int blockidx = g_sdio.blocks_checksumed++;
-    g_sdio.next_wr_block_checksum = sdio_crc16_4bit_checksum(g_sdio.data_buf + blockidx * SDIO_WORDS_PER_BLOCK,
-                                                             SDIO_WORDS_PER_BLOCK);
+    g_sdio.next_wr_block_checksum = sdio_crc16_4bit_checksum(g_sdio.data_buf + blockidx * g_sdio.words_per_block,
+                                                             g_sdio.words_per_block);
 }
 
 // Start transferring data from memory to SD card
-sdio_status_t rp2040_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks)
+sdio_status_t rp2040_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize)
 {
     // Buffer must be aligned
     assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
@@ -634,6 +575,8 @@ sdio_status_t rp2040_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks)
     g_sdio.total_blocks = num_blocks;
     g_sdio.blocks_checksumed = 0;
     g_sdio.checksum_errors = 0;
+    g_sdio.blocksize = blocksize;
+    g_sdio.words_per_block = blocksize / 4;
 
     // Compute first block checksum
     sdio_compute_next_tx_checksum();
@@ -762,7 +705,7 @@ sdio_status_t rp2040_sdio_tx_poll(uint32_t *bytes_complete)
  */
     if (bytes_complete)
     {
-        *bytes_complete = g_sdio.blocks_done * SDIO_BLOCK_SIZE;
+        *bytes_complete = g_sdio.blocks_done * g_sdio.words_per_block;
     }
 
     if (g_sdio.transfer_state == SDIO_IDLE)
