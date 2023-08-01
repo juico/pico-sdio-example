@@ -46,10 +46,11 @@ const bool PRE_ALLOCATE = true;
 const bool SKIP_FIRST_LATENCY = true;
 
 // Size of read/write.
-const size_t BUF_SIZE = 32768;
+//const size_t BUF_SIZE = 32768;
+const size_t BUF_SIZE = 1024;
 
 // File size in MB where MB = 1,000,000 bytes.
-const uint32_t FILE_SIZE_MB = 50;//BUF_SIZE*5;
+
 
 // Write pass count.
 const uint8_t WRITE_COUNT = 2;
@@ -60,8 +61,8 @@ const uint8_t READ_COUNT = 2;
 // End of configuration constants.
 //------------------------------------------------------------------------------
 // File size in bytes.
-const uint32_t FILE_SIZE = 2000*BUF_SIZE;//1000000UL*FILE_SIZE_MB;
-
+const uint32_t FILE_SIZE = 10000*BUF_SIZE;//1000000UL*FILE_SIZE_MB;
+const uint32_t FILE_SIZE_MB = FILE_SIZE/1000000;//BUF_SIZE*5;
 // Insure 4-byte alignment.
 uint32_t buf32[(BUF_SIZE + 3)/4];
 uint8_t* buf = (uint8_t*)buf32;
@@ -142,7 +143,7 @@ void setup() {
 }
 //------------------------------------------------------------------------------
 int main() {
-  //set_sys_clock_khz(125000,true);
+  //set_sys_clock_khz(150000,true);
   set_sys_clock_khz(250000,true);
   stdio_init_all();
   //stdout_uart_init();
@@ -216,7 +217,7 @@ cout << "Hoi" << endl;
     totalLatency = 0;
     skipLatency = SKIP_FIRST_LATENCY;
     uint32_t currentsector= file.firstSector();
-    sd.card()->writeStart(currentsector, FILE_SIZE/512);
+    //sd.card()->writeStart(currentsector, FILE_SIZE/512);
     sleep_ms(500);
     t = millis();
     for (uint32_t i = 0; i < n; i++) {

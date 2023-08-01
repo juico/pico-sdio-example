@@ -95,7 +95,11 @@ static bool sdio_read_ext_register(int m_io, int func_no, uint32_t addr, uint32_
 
 static bool sdio_write_ext_register_byte(int m_io, int func_no, uint32_t addr, uint8_t byte_val)
 {
-    g_sdio_dma_buf[0] = byte_val;
+    for(int i=0;i<128;i++){
+        g_sdio_dma_buf[i]=0;
+    }
+    uint8_t *buf2=(uint8_t*) g_sdio_dma_buf;
+    buf2[0] = byte_val;
 
     uint32_t write_arg = ((uint32_t)(m_io & 1) << 31) |
                          ((uint32_t)(func_no & 15) << 27) |
@@ -148,21 +152,24 @@ bool sdio_set_cache_enabled(bool enabled)
     bool cache_support = (sd_status[5] >> 18) & 1;
     int cqueue_support = (sd_status[5] >> 19) & 31;
 
-    printf("SD card cache support: %d, command queue support: %d", (int)cache_support,cqueue_support);
+    printf("SD card cache support: %d, command queue support: %d \n", (int)cache_support,cqueue_support);
 
     if (cache_support)
     {
         uint8_t page_hdr[8];
         sdio_read_ext_register(0, 2, 0, sizeof(page_hdr), page_hdr);
-        //printf("Performance enhancement page hdr: ", bytearray(page_hdr, 8));
-
+        printf("Performance enhancement page hdr: ");
+        for(int i =0;i<8;i++){
+            printf("%d,",page_hdr[i]);
+        }
+        printf("\n");
         // Enable cache by writing byte 260, refer to SDIO spec "Table 5-30 : Performance Enhancement Register Set"
         if (sdio_write_ext_register_byte(0, 2, 260, enabled))
         {
             uint8_t state;
             sdio_read_ext_register(0, 2, 260, 1, &state);
 
-            printf("SD card cache state: ", state);
+            printf("SD card cache state: %d \n", state);
             return true;
         }
     }
@@ -372,6 +379,7 @@ uint32_t SdioCard::status()
 
 bool SdioCard::stopTransmission(bool blocking)
 {
+    m_curState=IDLE_STATE;
     uint32_t reply;
     if (!checkReturnOk(rp2040_sdio_command_R1(CMD12, 0, &reply)))
     {
@@ -406,7 +414,13 @@ bool SdioCard::stopTransmission(bool blocking)
 
 bool SdioCard::syncDevice()
 {
-    return true;
+//   if (!waitTransferComplete()) {
+//     return false;
+//   }
+  if (m_curState != IDLE_STATE) {
+    return stopTransmission(true);
+  }
+  return true;
 }
 
 uint8_t SdioCard::type() const
@@ -419,28 +433,65 @@ uint8_t SdioCard::type() const
 
 bool SdioCard::writeData(const uint8_t* src)
 {
-  printf("SDIO", "SdioCard::writeData() called but not implemented!");
-    return false;
+// DBG_IRQSTAT();
+//   if (!waitTransferComplete()) {
+//     return false;
+//   }
+//   const uint32_t* p32 = reinterpret_cast<const uint32_t*>(src);
+//   if (!(SDHC_PRSSTAT & SDHC_PRSSTAT_WTA)) {
+//     SDHC_PROCTL &= ~SDHC_PROCTL_SABGREQ;
+//     SDHC_PROCTL |= SDHC_PROCTL_CREQ;
+//   }
+//   SDHC_PROCTL |= SDHC_PROCTL_SABGREQ;
+//   if (waitTimeout(isBusyFifoWrite)) {
+//     return sdError(SD_CARD_ERROR_WRITE_FIFO);
+//   }
+//   for (uint32_t iw = 0 ; iw < 512/(4*FIFO_WML); iw++) {
+//     while (0 == (SDHC_PRSSTAT & SDHC_PRSSTAT_BWEN)) {
+//     }
+//     for (uint32_t i = 0; i < FIFO_WML; i++) {
+//       SDHC_DATPORT = p32[i];
+//     }
+//     p32 += FIFO_WML;
+//   }
+//   m_transferActive = true;
+//   return true;
+    if (((uint32_t)src & 3) != 0)
+    {
+        // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
+        memcpy(g_sdio_dma_buf, src, sizeof(g_sdio_dma_buf));
+        src = (uint8_t*)g_sdio_dma_buf;
+    }    
+    if (!checkReturnOk(rp2040_sdio_tx_start(src, 1))) // Start transmission
+    {
+        return false;
+    }
+
+    do {
+        uint32_t bytes_done;
+        g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+      printf("SDIO", "SdioCard::writeSector(", m_curSector, ") failed: ", (int)g_sdio_error);
+    }
+    return true;
 }
 
+// bool SdioCard::writeStart(uint32_t sector)
+// {
+//   printf("SDIO", "SdioCard::writeStart() called but not implemented!");
+//     return false;
+// }
 bool SdioCard::writeStart(uint32_t sector)
-{
-  printf("SDIO", "SdioCard::writeStart() called but not implemented!");
-    return false;
-}
-bool SdioCard::writeStart(uint32_t sector,uint32_t count)
 {   
-    m_curSector=sector;
-    multi_write_end=m_curSector+count;
         uint32_t reply;
         if(!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) ||
-        !checkReturnOk(rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply)) || // APP_CMD
-        !checkReturnOk(rp2040_sdio_command_R1(ACMD23, count, &reply))||  // SET_WR_CLK_ERASE_COUNT
         !checkReturnOk(rp2040_sdio_command_R1(CMD25, sector, &reply)) // WRITE_MULTIPLE_BLOCK
         ){
             return false;
         }
-        multi_write=true;
         return true;
     
 }
@@ -451,6 +502,7 @@ bool SdioCard::writeStop()
 
 bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
 {
+    
   printf("SDIO", "SdioCard::erase() not implemented");
     return false;
 }
@@ -494,20 +546,64 @@ bool SdioCard::Acmd( uint8_t acommand, uint32_t arg) {
 
 bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 {
-    if (((uint32_t)src & 3) != 0)
+
+//      if (m_sdioConfig.useDma()) {
+//     uint8_t* ptr;
+//     uint8_t aligned[512];
+//     if (3 & (uint32_t)src) {
+//       ptr = aligned;
+//       memcpy(aligned, src, 512);
+//     } else {
+//       ptr = const_cast<uint8_t*>(src);
+//     }
+//     if (!rdWrSectors(CMD24_DMA_XFERTYP, sector, ptr, 1)) {
+//       return sdError(SD_CARD_ERROR_CMD24);
+//     }
+//   } else {
+//     if (!waitTransferComplete()) {
+//       return false;
+//     }
+// #if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+//     // End transfer with CMD12 if required.
+//     if ((SDHC_BLKATTR & 0XFFFF0000) == 0) {
+//       if (!syncDevice()) {
+//         return false;
+//       }
+//     }
+// #endif  // defined(__MK64FX512__) || defined(__MK66FX1M0__)
+//     if (m_curState != WRITE_STATE || m_curSector != sector) {
+//       if (!syncDevice()) {
+//         return false;
+//       }
+//       if (!writeStart(sector )) {
+//         return false;
+//       }
+//       m_curSector = sector;
+//       m_curState = WRITE_STATE;
+//     }
+//     if (!writeData(src)) {
+//       return false;
+//     }
+//     m_curSector++;
+//   }
+//   return true;
+if(m_curState!=WRITE_STATE || m_curSector!=sector){
+    if(!syncDevice()){
+        return false;
+    }
+    if(!writeStart(sector)){
+        return false;
+    }
+    m_curSector=sector;
+    m_curState=WRITE_STATE;
+}
+if (((uint32_t)src & 3) != 0)
     {
         // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
         memcpy(g_sdio_dma_buf, src, sizeof(g_sdio_dma_buf));
         src = (uint8_t*)g_sdio_dma_buf;
-    }
-
-    // If possible, report transfer status to application through callback.
-    sd_callback_t callback = get_stream_callback(src, 512, "writeSector", sector);
-
-    uint32_t reply;
-    if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
-        !checkReturnOk(rp2040_sdio_command_R1(CMD24, sector, &reply)) || // WRITE_BLOCK
-        !checkReturnOk(rp2040_sdio_tx_start(src, 1))) // Start transmission
+    }    
+    if (!checkReturnOk(rp2040_sdio_tx_start(src, 1))) // Start transmission
     {
         return false;
     }
@@ -515,104 +611,163 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
     do {
         uint32_t bytes_done;
         g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
-
-        if (callback)
-        {
-            callback(m_stream_count_start + bytes_done);
-        }
     } while (g_sdio_error == SDIO_BUSY);
 
     if (g_sdio_error != SDIO_OK)
     {
-      printf("SDIO", "SdioCard::writeSector(", sector, ") failed: ", (int)g_sdio_error);
+      printf("SDIO", "SdioCard::writeSector(", m_curSector, ") failed: ", (int)g_sdio_error);
     }
 
-    return g_sdio_error == SDIO_OK;
-}
-bool SdioCard::startWriteSectors(uint32_t n){
-        uint32_t reply;
-        rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply); // APP_CMD
-        rp2040_sdio_command_R1(ACMD23, n, &reply);// SET_WR_CLK_ERASE_COUNT
-        //rp2040_sdio_command_R1(CMD25, sector, &reply) || // WRITE_MULTIPLE_BLOCK
-        //TODO 
-        //implement CMD20 to start recording
-        //use cmd23 and cmd23 to set adress
-        return true;
+m_curSector++;
+return true;
+//     if (((uint32_t)src & 3) != 0)
+//     {
+//         // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
+//         memcpy(g_sdio_dma_buf, src, sizeof(g_sdio_dma_buf));
+//         src = (uint8_t*)g_sdio_dma_buf;
+//     }
+
+//     // If possible, report transfer status to application through callback.
+//     sd_callback_t callback = get_stream_callback(src, 512, "writeSector", sector);
+
+//     uint32_t reply;
+//     if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
+//         !checkReturnOk(rp2040_sdio_command_R1(CMD24, sector, &reply)) || // WRITE_BLOCK
+//         !checkReturnOk(rp2040_sdio_tx_start(src, 1))) // Start transmission
+//     {
+//         return false;
+//     }
+
+//     do {
+//         uint32_t bytes_done;
+//         g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
+
+//         if (callback)
+//         {
+//             callback(m_stream_count_start + bytes_done);
+//         }
+//     } while (g_sdio_error == SDIO_BUSY);
+
+//     if (g_sdio_error != SDIO_OK)
+//     {
+//       printf("SDIO", "SdioCard::writeSector(", sector, ") failed: ", (int)g_sdio_error);
+//     }
+
+//     return g_sdio_error == SDIO_OK;
 }
 bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 {
-    if (((uint32_t)src & 3) != 0)
+if(m_curState!=WRITE_STATE || m_curSector!=sector){
+    if(!syncDevice()){
+        return false;
+    }
+    if(!writeStart(sector)){
+        return false;
+    }
+    m_curSector=sector;
+    m_curState=WRITE_STATE;
+}
+if (((uint32_t)src & 3) != 0)
     {
-        // Unaligned write, execute sector-by-sector
-        for (size_t i = 0; i < n; i++)
-        {
-            if (!writeSector(sector + i, src + 512 * i))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-    //check if multi write is still valid
-    if(multi_write){
-        if(sector!=m_curSector){
-            multi_write=false;
-            stopTransmission(true);
-        }
-    }
-    sd_callback_t callback = get_stream_callback(src, n * 512, "writeSectors", sector);
-    if(multi_write){
-        uint32_t reply;
-        if (
-            !checkReturnOk(rp2040_sdio_tx_start(src, n))) // Start transmission
-        {
-            return false;
-        }
-    }else{
-        uint32_t reply;
-        if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
-            !checkReturnOk(rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply)) || // APP_CMD
-            !checkReturnOk(rp2040_sdio_command_R1(ACMD23, n, &reply)) || // SET_WR_CLK_ERASE_COUNT
-            !checkReturnOk(rp2040_sdio_command_R1(CMD25, sector, &reply)) || // WRITE_MULTIPLE_BLOCK
-            !checkReturnOk(rp2040_sdio_tx_start(src, n))) // Start transmission
-        {
-            return false;
-        }
+        // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
+        memcpy(g_sdio_dma_buf, src, sizeof(g_sdio_dma_buf));
+        src = (uint8_t*)g_sdio_dma_buf;
+    }    
+    if (!checkReturnOk(rp2040_sdio_tx_start(src, n))) // Start transmission
+    {
+        return false;
     }
 
-    m_curSector=m_curSector+n;
-    if(m_curSector==multi_write_end){
-        multi_write=false;
-    }
     do {
         uint32_t bytes_done;
         g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
-
-        if (callback)
-        {
-            callback(m_stream_count_start + bytes_done);
-        }
     } while (g_sdio_error == SDIO_BUSY);
 
     if (g_sdio_error != SDIO_OK)
     {
-      printf("SDIO", "SdioCard::writeSectors(", sector, ",...,", (int)n, ") failed: ", (int)g_sdio_error);
-        stopTransmission(true);
-        return false;
+      printf("SDIO", "SdioCard::writeSector(", m_curSector, ") failed: ", (int)g_sdio_error);
     }
-    else
-    {
-        if(!multi_write){
-            return stopTransmission(true);
-        }
-        else{
-            return true;
-        }
-    }
+
+m_curSector=m_curSector+n;
+return true;
+//     if (((uint32_t)src & 3) != 0)
+//     {
+//         // Unaligned write, execute sector-by-sector
+//         for (size_t i = 0; i < n; i++)
+//         {
+//             if (!writeSector(sector + i, src + 512 * i))
+//             {
+//                 return false;
+//             }
+//         }
+//         return true;
+//     }
+//     //check if multi write is still valid
+//     if(multi_write){
+//         if(sector!=m_curSector){
+//             multi_write=false;
+//             stopTransmission(true);
+//         }
+//     }
+//     sd_callback_t callback = get_stream_callback(src, n * 512, "writeSectors", sector);
+//     if(multi_write){
+//         uint32_t reply;
+//         if (
+//             !checkReturnOk(rp2040_sdio_tx_start(src, n))) // Start transmission
+//         {
+//             return false;
+//         }
+//     }else{
+//         uint32_t reply;
+//         if (!checkReturnOk(rp2040_sdio_command_R1(16, 512, &reply)) || // SET_BLOCKLEN
+//             !checkReturnOk(rp2040_sdio_command_R1(CMD55, g_sdio_rca, &reply)) || // APP_CMD
+//             !checkReturnOk(rp2040_sdio_command_R1(ACMD23, n, &reply)) || // SET_WR_CLK_ERASE_COUNT
+//             !checkReturnOk(rp2040_sdio_command_R1(CMD25, sector, &reply)) || // WRITE_MULTIPLE_BLOCK
+//             !checkReturnOk(rp2040_sdio_tx_start(src, n))) // Start transmission
+//         {
+//             return false;
+//         }
+//     }
+
+//     m_curSector=m_curSector+n;
+//     if(m_curSector==multi_write_end){
+//         multi_write=false;
+//     }
+//     do {
+//         uint32_t bytes_done;
+//         g_sdio_error = rp2040_sdio_tx_poll(&bytes_done);
+
+//         if (callback)
+//         {
+//             callback(m_stream_count_start + bytes_done);
+//         }
+//     } while (g_sdio_error == SDIO_BUSY);
+
+//     if (g_sdio_error != SDIO_OK)
+//     {
+//       printf("SDIO", "SdioCard::writeSectors(", sector, ",...,", (int)n, ") failed: ", (int)g_sdio_error);
+//         stopTransmission(true);
+//         return false;
+//     }
+//     else
+//     {
+//         if(!multi_write){
+//             return stopTransmission(true);
+//         }
+//         else{
+//             return true;
+//         }
+//     }
 }
 
 bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 {
+    if(m_curState==WRITE_STATE){
+        if(!syncDevice()){
+            return false;
+        }
+        m_curState=IDLE_STATE;
+    }
     uint8_t *real_dst = dst;
     if (((uint32_t)dst & 3) != 0)
     {

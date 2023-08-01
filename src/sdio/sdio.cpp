@@ -769,7 +769,7 @@ void rp2040_sdio_init(int clock_divider)
     sm_config_set_in_pins(&cfg, SDIO_CMD);
     sm_config_set_set_pins(&cfg, SDIO_CMD, 1);
     sm_config_set_jmp_pin(&cfg, SDIO_CMD);
-    sm_config_set_sideset_pins(&cfg, 22);
+    //sm_config_set_sideset_pins(&cfg, 22);
     // sm_config_set_sideset_pins(&cfg, SDIO_CLK);
     sm_config_set_out_shift(&cfg, false, true, 32);
     sm_config_set_in_shift(&cfg, false, true, 32);
@@ -778,7 +778,7 @@ void rp2040_sdio_init(int clock_divider)
 
     pio_sm_init(SDIO_PIO, SDIO_CMD_SM, g_sdio.pio_cmd_clk_offset, &cfg);
     //pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, SDIO_CLK, 1, true);
-    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, 22, 1, true);
+    //pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_CMD_SM, 22, 1, true);
 
     // IRQ Clock 
     g_sdio.pio_irq_clk_offset = pio_add_program(SDIO_PIO,&sdio_irq_clk_program);
@@ -834,7 +834,7 @@ void rp2040_sdio_init(int clock_divider)
     // Redirect GPIOs to PIO
     gpio_set_function(SDIO_CMD, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_CLK, GPIO_FUNC_PIO1);
-    gpio_set_function(22,GPIO_FUNC_PIO1);
+    //gpio_set_function(22,GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D0, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D1, GPIO_FUNC_PIO1);
     gpio_set_function(SDIO_D2, GPIO_FUNC_PIO1);
