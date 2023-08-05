@@ -41,10 +41,13 @@ static struct {
     uint32_t *data_buf;
     uint32_t blocks_done; // Number of blocks transferred so far
     uint32_t total_blocks; // Total number of blocks to transfer
+    uint32_t blocks_done_n; // Number of blocks transferred so far
+    uint32_t total_blocks_n; // Total number of blocks to transfer
     uint32_t blocks_checksumed; // Number of blocks that have had CRC calculated
     uint32_t checksum_errors; // Number of checksum errors detected
     uint32_t blocksize; // Number of bytes per block (typically 512)
     uint32_t words_per_block; // Number of 32-bit words per block (typically 128)    
+    bool clock_enabled;// Keep track if clock is disabled during a read
 
     // Variables for block writes    
     uint64_t next_wr_block_checksum;
@@ -139,6 +142,9 @@ uint64_t sdio_crc16_4bit_checksum(uint32_t *data, uint32_t num_words)
 
 static void sdio_send_command(uint8_t command, uint32_t arg, uint8_t response_bits)
 {
+    if(g_sdio.clock_enabled==false){
+        enable_clock(true);
+    }
   // printf("SDIO Command: ", (int)command, " arg ", arg);
 
     // Format the arguments in the way expected by the PIO code.
@@ -219,14 +225,14 @@ sdio_status_t rp2040_sdio_command_R1(uint8_t command, uint32_t arg, uint32_t *re
         uint8_t actual_crc = ((resp1 >> 0) & 0xFE);
         if (crc != actual_crc)
         {
-          printf("rp2040_sdio_command_R1(", (int)command, "): CRC error, calculated ", crc, " packet has ", actual_crc);
+          printf("rp2040_sdio_command_R1(%d): CRC error, calculated %d packet has %d\n",command, crc, actual_crc);
             return SDIO_ERR_RESPONSE_CRC;
         }
 
         uint8_t response_cmd = ((resp0 >> 24) & 0xFF);
         if (response_cmd != command && command != 41)
         {
-          printf("rp2040_sdio_command_R1(", (int)command, "): received reply for ", (int)response_cmd);
+          printf("rp2040_sdio_command_R1(%d): received reply for %d \n",(int)command, (int)response_cmd);
             return SDIO_ERR_RESPONSE_CODE;
         }
 
@@ -353,8 +359,10 @@ sdio_status_t rp2040_sdio_command_R3(uint8_t command, uint32_t arg, uint32_t *re
  * Data reception from SD card
  *******************************************************/
 
-sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t blocksize)
+sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t blocksize,bool enable_irq)
 {
+    
+
     // Buffer must be aligned
     assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
 
@@ -362,6 +370,8 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t
     g_sdio.transfer_start_time = millis();
     g_sdio.data_buf = (uint32_t*)buffer;
     g_sdio.blocks_done = 0;
+    g_sdio.blocks_done_n=0;
+     g_sdio.total_blocks_n = 2*num_blocks;
     g_sdio.total_blocks = num_blocks;
     g_sdio.blocks_checksumed = 0;
     g_sdio.checksum_errors = 0;
@@ -397,9 +407,18 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t
     channel_config_set_read_increment(&dmacfg, true);
     channel_config_set_write_increment(&dmacfg, true);
     channel_config_set_ring(&dmacfg, true, 3);
+    
     dma_channel_configure(SDIO_DMA_CHB, &dmacfg, &dma_hw->ch[SDIO_DMA_CH].al1_write_addr,
         g_sdio.dma_blocks, 2, false);
-
+    // Enable IRQ to trigger when block is done to check if clock has to be halted
+    if(enable_irq){
+            if(irq_get_exclusive_handler(DMA_IRQ_1)==rp2040_sdio_tx_irq){
+        irq_remove_handler(DMA_IRQ_1,rp2040_sdio_tx_irq);
+        irq_set_exclusive_handler(DMA_IRQ_1, rp2040_sdio_rx_irq);
+    }
+    dma_hw->ints1 = 1 << SDIO_DMA_CHB;
+    dma_set_irq1_channel_mask_enabled(1 << SDIO_DMA_CHB, 1);
+    }
     // Initialize PIO state machine
     pio_sm_init(SDIO_PIO, SDIO_DATA_SM, g_sdio.pio_data_rx_offset, &g_sdio.pio_cfg_data_rx);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_DATA_SM, SDIO_D0, 4, false);
@@ -415,7 +434,9 @@ sdio_status_t rp2040_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks,uint32_t
     // Start PIO and DMA
     dma_channel_start(SDIO_DMA_CHB);
     pio_sm_set_enabled(SDIO_PIO, SDIO_DATA_SM, true);
-
+    if(g_sdio.clock_enabled==false){
+        enable_clock(true);
+    }
     return SDIO_OK;
 }
 // Check checksums for received blocks
@@ -438,9 +459,7 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
             g_sdio.checksum_errors++;
             if (g_sdio.checksum_errors == 1)
             {
-              // printf
-                ("SDIO checksum error in reception: block ", blockidx,
-                      " calculated ", checksum, " expected ", expected);
+               printf("SDIO checksum error in reception: block %d calculated %016X expected %016X\n",blockidx,checksum, expected);
             }
         }
     }
@@ -565,6 +584,12 @@ static void sdio_compute_next_tx_checksum()
 // Start transferring data from memory to SD card
 sdio_status_t rp2040_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize)
 {
+    if(irq_get_exclusive_handler(DMA_IRQ_1)==rp2040_sdio_rx_irq){
+        irq_remove_handler(DMA_IRQ_1,rp2040_sdio_rx_irq);
+        irq_set_exclusive_handler(DMA_IRQ_1, rp2040_sdio_tx_irq);
+    }
+
+
     // Buffer must be aligned
     assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS);
 
@@ -613,21 +638,49 @@ sdio_status_t check_sdio_write_response(uint32_t card_response)
     }
     else if (wr_status == 5)
     {
-      printf("SDIO card reports write CRC error, status ", card_response);
+      printf("SDIO card reports write CRC error, status %d", card_response);
         return SDIO_ERR_WRITE_CRC;    
     }
     else if (wr_status == 6)
     {
-      printf("SDIO card reports write failure, status ", card_response);
+      printf("SDIO card reports write failure, status %d", card_response);
         return SDIO_ERR_WRITE_FAIL;    
     }
     else
     {
-      printf("SDIO card reports unknown write status ", card_response);
+      printf("SDIO card reports unknown write status %d", card_response);
         return SDIO_ERR_WRITE_FAIL;    
     }
 }
 
+static void rp2040_sdio_rx_irq(){
+
+    dma_hw->ints1 = 1 << SDIO_DMA_CHB;
+g_sdio.blocks_done_n++;
+    //stop the clock in order to pause the transfer
+    if(g_sdio.blocks_done_n==g_sdio.total_blocks_n){
+        //timing? how many clock cycles to wait
+        pio_set_sm_mask_enabled(SDIO_PIO,(1u << SDIO_IRQ_SM) | (1u << SDIO_CMD_SM),false);
+        g_sdio.clock_enabled=false;
+        for(int i=0;i<100000;i++){
+            asm("nop");
+        }
+        printf("disabled clock irq\n");
+    }
+
+
+} 
+void enable_clock(bool enable)
+{
+        pio_set_sm_mask_enabled(SDIO_PIO,(1u << SDIO_IRQ_SM) | (1u << SDIO_CMD_SM),enable);
+        g_sdio.clock_enabled=enable;
+        if(enable){
+            //printf("enabled clock\n");
+        }
+        else{
+            //printf("disabled clock\n");
+        }
+}
 // When a block finishes, this IRQ handler starts the next one
 static void rp2040_sdio_tx_irq()
 {
@@ -789,6 +842,7 @@ void rp2040_sdio_init(int clock_divider)
     pio_sm_init(SDIO_PIO,SDIO_IRQ_SM,g_sdio.pio_irq_clk_offset,&cfg);
     pio_sm_set_consecutive_pindirs(SDIO_PIO,SDIO_IRQ_SM,SDIO_CLK,1,true);
     pio_enable_sm_mask_in_sync(SDIO_PIO,(1u << SDIO_IRQ_SM) | (1u << SDIO_CMD_SM));
+    g_sdio.clock_enabled=true;
     // pio_sm_set_enabled(SDIO_PIO, SDIO_CMD_SM, true);
     // Data reception program
     g_sdio.pio_data_rx_offset = pio_add_program(SDIO_PIO, &sdio_data_rx_program);
@@ -817,7 +871,7 @@ void rp2040_sdio_init(int clock_divider)
     
     // Set pullups
     gpio_pull_up(SDIO_CMD);
-    gpio_pull_down(SDIO_CLK);
+    //gpio_pull_down(SDIO_CLK);
     gpio_pull_up(SDIO_D0);
     gpio_pull_up(SDIO_D1);
     gpio_pull_up(SDIO_D2);

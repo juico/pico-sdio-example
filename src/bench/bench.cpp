@@ -61,7 +61,7 @@ const uint8_t READ_COUNT = 2;
 // End of configuration constants.
 //------------------------------------------------------------------------------
 // File size in bytes.
-const uint32_t FILE_SIZE = 10000*BUF_SIZE;//1000000UL*FILE_SIZE_MB;
+const uint32_t FILE_SIZE = 100*BUF_SIZE;//1000000UL*FILE_SIZE_MB;
 const uint32_t FILE_SIZE_MB = FILE_SIZE/1000000;//BUF_SIZE*5;
 // Insure 4-byte alignment.
 uint32_t buf32[(BUF_SIZE + 3)/4];
@@ -144,7 +144,7 @@ void setup() {
 //------------------------------------------------------------------------------
 int main() {
   //set_sys_clock_khz(150000,true);
-  set_sys_clock_khz(250000,true);
+  set_sys_clock_khz(200000,true);
   stdio_init_all();
   //stdout_uart_init();
   float s;
@@ -153,7 +153,7 @@ int main() {
   uint32_t minLatency;
   uint32_t totalLatency;
   bool skipLatency;
-  sleep_ms(500);
+  //sleep_ms(5000);
   // Discard any input.
   //  clearSerialInput();
 
